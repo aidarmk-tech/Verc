@@ -1,40 +1,94 @@
-export default async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+// Vercel Serverless Function — CORS прокси для kinogo.limited
+// Деплой: vercel deploy
+// URL после деплоя: https://your-app.vercel.app/api/proxy?url=...
 
-    if (req.method === 'OPTIONS') {
-        return res.status(204).end();
-    }
+const https = require('https');
+const http = require('http');
+const zlib = require('zlib');
 
-    const path = req.query.path || '/';
-    const target = 'https://filmix.lat' + path;
+const ALLOWED_HOST = 'sk.kinogo.limited';
 
-    const agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0',
-    ];
-    const ua = agents[Math.floor(Math.random() * agents.length)];
+module.exports = async (req, res) => {
+  // CORS заголовки
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    try {
-        const response = await fetch(target, {
-            method: 'GET',
-            headers: {
-                'User-Agent': ua,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-                'Referer': 'https://filmix.lat/',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
-                'Upgrade-Insecure-Requests': '1',
-            },
-            redirect: 'follow',
-        });
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
-        const html = await response.text();
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  const targetUrl = req.query.url;
+
+  if (!targetUrl) {
+    return res.status(400).json({ error: 'Параметр url обязателен' });
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(targetUrl);
+  } catch (e) {
+    return res.status(400).json({ error: 'Неверный URL' });
+  }
+
+  // Безопасность: разрешаем только kinogo.limited
+  if (parsedUrl.hostname !== ALLOWED_HOST) {
+    return res.status(403).json({ error: 'Разрешён только ' + ALLOWED_HOST });
+  }
+
+  const options = {
+    hostname: parsedUrl.hostname,
+    path: parsedUrl.pathname + parsedUrl.search,
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Referer': 'https://sk.kinogo.limited/',
+    },
+    timeout: 15000,
+  };
+
+  const protocol = parsedUrl.protocol === 'https:' ? https : http;
+
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const proxyReq = protocol.request(options, (proxyRes) => {
+        const chunks = [];
+
+        let stream = proxyRes;
+
+        const encoding = proxyRes.headers['content-encoding'];
+        if (encoding === 'gzip') {
+          stream = proxyRes.pipe(zlib.createGunzip());
+        } else if (encoding === 'deflate') {
+          stream = proxyRes.pipe(zlib.createInflate());
+        } else if (encoding === 'br') {
+          stream = proxyRes.pipe(zlib.createBrotliDecompress());
+        }
+
+        stream.on('data', chunk => chunks.push(chunk));
+        stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+        stream.on('error', reject);
+      });
+
+      proxyReq.on('timeout', () => {
+        proxyReq.destroy();
+        reject(new Error('Timeout'));
+      });
+
+      proxyReq.on('error', reject);
+      proxyReq.end();
+    });
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(data);
+  } catch (e) {
+    console.error('Proxy error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+};        res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('Cache-Control', 'public, s-maxage=300');
         res.status(response.status).send(html);
     } catch (err) {
